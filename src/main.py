@@ -1,9 +1,7 @@
 import cv2 as cv
 import numpy as np
 
-import time
-import sys
-import os
+import os,re, time, sys
 
 from numpy.core.fromnumeric import size
 from numpy.lib.function_base import disp
@@ -19,7 +17,29 @@ CONFIDENCE=0.5
 SCORE_THRESHOLD=0.5
 IOU_THRESHOLD=0.5
 
+# Set resolution constants; 16:9 standards
+PX1080 = (1920,1080)
+PX720 = (1280,720)
+PX480 = (640,480)
 
+# change device resolution; accepts cv2 device object and resolution as a 2-tuple(w,h)
+def change_res(dev,res):
+  if dev.set(3,res[0]) and dev.set(4,res[1]):
+    return dev
+  else:
+    return False
+
+# get server IP from /etc/resolv.conf(gateway IP) to work with WSL2
+# return device object if successful
+# otherwise False
+def load_camstream(re, dev, res):
+  PATTERN=re.compile(r'nameserver.{1}(.*?)$')
+  with open('/etc/resolv.conf', 'r') as resolv:
+    for l in resolv.readlines():
+      if match:=PATTERN.match(l):
+        if dev.open('http://'+match.group(1)+':8888'):
+          return dev
+  return False
 
 def load_net(CONFIG_PATH,WEIGHTS_PATH):
   # load YOLOV3 Network
@@ -29,7 +49,7 @@ def load_net(CONFIG_PATH,WEIGHTS_PATH):
   net.setPreferableTarget(cv.dnn.DNN_TARGET_CUDA)
   return net
 
-def blobify(input,type='i',scale=0.5):
+def blobify(input,res=PX480,type='i',scale=0.5):
   if type == 'i':
     # image
     mat = cv.imread(input)
@@ -41,24 +61,25 @@ def blobify(input,type='i',scale=0.5):
     # video
     pass
   scale_factor = 1/255.0
-  blob = cv.dnn.blobFromImage(mat, scale_factor, (416,416), swapRB=True,crop=False)
+  blob = cv.dnn.blobFromImage(mat, scale_factor, res, swapRB=True,crop=False)
   # print dimensions
   print("image.shape:", mat.shape)
   print("blob.shape:", blob.shape)
   return (blob,mat,(w,h))
 
-def blobify_stream(dev):
+
+def blobify_stream(dev, res):
   _, frame = dev.read()
   w,h = frame.shape[:2]
   scale_factor = 1/255.0
-  blob = cv.dnn.blobFromImage(frame, scale_factor, (416,416), swapRB=True,crop=False)
+  # blob = cv.dnn.blobFromImage(frame, scale_factor, (w,h), swapRB=True,crop=False) # assuming you are able to set camera resolution and frame dimensions are the same
+  blob = cv.dnn.blobFromImage(frame, scale_factor, res, swapRB=True,crop=False)
   return (blob,frame,(w,h))
 
 
-
 def predict(net,blob):
-  input,_,dim = blob
-  w,h = dim
+  input,dim = blob
+  h,w = dim
   net.setInput(input)
   ln = net.getLayerNames()
   # print(net.getUnconnectedOutLayers())
@@ -138,21 +159,38 @@ def main():
   labels_file = 'data/coco.names'
   input_file = 'images/street.jpg'
   labels=open(os.path.join(PROJ_PATH,labels_file)).read().strip().split('\n')
+  print(labels)
   net = load_net(CONFIG_PATH,WEIGHTS_PATH)
   ## object detection on static image
   # 
   # blob,mat,dim =  blobify(input_file)
   # output = predict(net,(blob,mat,dim))
   # display(draw_boxes(mat, output, labels_file))
-  dev = cv.VideoCapture(0)
-  while True:
-    blob,mat,dim = blobify_stream(dev)
-    output = predict(net,(blob,mat,dim))
-    detect = draw_boxes(mat,output,labels)
-    cv.imshow('video',detect)
-    if cv.waitKey(1) == ord('q'):
-      cv.release()
-      break
+  # dev = cv.VideoCapture(0)
+  # dev = cv.VideoCapture('/dev/Video0') # WSL2 mapped USB device; make sure usbip is working both in host and client
+  RESOLUTION=PX480 #set once to set same size for all
+  dev = cv.VideoCapture()
+  # since we're getting the input from an http streaming webcam
+  # we might not be able to change the resolution
+  if resized:=change_res(dev, RESOLUTION):
+    dev = resized
+  else:
+    # DO something if it can't set the device resolution
+    pass
+  cv.namedWindow('video', cv.WINDOW_KEEPRATIO)
+  cv.resizeWindow('video', RESOLUTION)
+  if camserver:=load_camstream(re, dev, RESOLUTION):
+    while True:
+      blob,mat,dim = blobify_stream(camserver, RESOLUTION)
+      output = predict(net,(blob,dim))
+      detect = draw_boxes(mat,output,labels)
+      cv.imshow('video',detect)
+      if cv.waitKey(1) == ord('q'):
+        camserver.release()
+        cv.destroyAllWindows()
+        break
+  else:
+    print("could not open mjpeg stream")
   return None
 
 if __name__ == '__main__':
